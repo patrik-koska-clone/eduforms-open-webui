@@ -7,8 +7,9 @@ import sys
 import logging
 import aiohttp
 import requests
+import httpx
 
-from fastapi import FastAPI, Request, Depends, status
+from fastapi import APIRouter, FastAPI, Request, Depends, status
 from fastapi.staticfiles import StaticFiles
 from fastapi import HTTPException
 from fastapi.middleware.wsgi import WSGIMiddleware
@@ -16,6 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse, Response
+from starlette.types import Message, Receive, Scope, Send
+from starlette.datastructures import Headers, URL
 
 from apps.ollama.main import app as ollama_app
 from apps.openai.main import app as openai_app
@@ -188,91 +191,89 @@ class RAGMiddleware(BaseHTTPMiddleware):
         async for data in original_generator:
             yield data
 
+from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse, Response
+import httpx
+
 class SplitMessagesMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.method == "POST" and (
-            "/openai/api/threads" in request.url.path and "messages" in request.url.path
-        ):
-            log.debug(f"request.url.path: {request.url.path}")
-
-            # Read the original request body
+        if request.method == "POST" and "/openai/api/threads" in request.url.path and "messages" in request.url.path:
             body = await request.body()
-            # Decode body to string
             body_str = body.decode("utf-8")
-            # Parse string to JSON
             data = json.loads(body_str) if body_str else {}
 
             if "messages" in data:
                 messages = data.pop("messages", [])
+                thread_id = data.get("thread_id")
+
                 responses = []
-                for message in messages:
-                    data["role"] = message["role"]
-                    data["content"] = message["content"]
-                    modified_body_bytes = json.dumps(data).encode("utf-8")
+                async with httpx.AsyncClient() as client:
+                    for message in messages:
+                        role = message.get("role")
+                        content = message.get("content")
 
-                    # Replace the request body with the modified one
-                    request._body = modified_body_bytes
+                        if not role or not content:
+                            continue  # Skip empty or invalid messages
 
-                    request.headers.__dict__["_list"] = [
-                        (b"content-length", str(len(modified_body_bytes)).encode("utf-8")),
-                        *[
-                            (k, v)
-                            for k, v in request.headers.raw
-                            if k.lower() != b"content-length"
-                        ],
-                    ]
+                        message_data = {
+                            "role": role,
+                            "content": content
+                        }
 
-                    response = await call_next(request)
+                        if thread_id:
+                            updated_path = f"/openai/api/threads/{thread_id}/messages"
+                        else:
+                            updated_path = "/openai/api/threads"
 
-                    responses.append(response)
+                        request_body = json.dumps(message_data).encode("utf-8")
+                        try:
+                            response = await client.post(
+                                str(request.url.replace(path=updated_path)),
+                                content=request_body,
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Content-Length": str(len(request_body)),
+                                    "Authorization": request.headers.get("Authorization")
+                                },
+                            )
+                        except httpx.RemoteProtocolError as e:
+                            print(f"Error processing message: {message}")
+                            print(f"Error details: {str(e)}")
+                            continue  # Skip the message and continue processing the remaining messages
 
-                # Check if the response is a streaming response
+                        if not thread_id:
+                            thread_id = response.json().get("id")
+
+                        responses.append(response)
+
                 if isinstance(responses[-1], StreamingResponse):
-                    # If it's a streaming response, return a new StreamingResponse
-                    # that combines the responses
                     return StreamingResponse(
-                        self.combine_streaming_responses(responses),
-                        media_type=responses[-1].media_type,
-                        headers=responses[-1].headers,
+                        content=self.combine_streaming_responses(responses),
+                        media_type=responses[-1].headers.get("content-type"),
                     )
                 else:
-                    # If it's not a streaming response, combine the responses
-                    # into a single JSON response
-                    combined_response = responses[-1]
-                    combined_response.body = b'[' + b','.join(resp.body for resp in responses) + b']'
-                    combined_response.headers["Content-Length"] = str(len(combined_response.body))
-                    return combined_response
-        
-        response = await call_next(request)
+                    combined_body = b'[' + b','.join(resp.content for resp in responses) + b']'
+                    return Response(
+                        content=combined_body,
+                        status_code=responses[-1].status_code,
+                        headers=responses[-1].headers,
+                        media_type=responses[-1].headers.get("content-type"),
+                    )
 
+        response = await call_next(request)
         return response
 
     async def combine_streaming_responses(self, responses):
         for response in responses:
-            async for chunk in response.body_iterator:
+            async for chunk in response.aiter_bytes():
                 yield chunk
 
+router = APIRouter()
 
-# class ThreadsMiddleware(BaseHTTPMiddleware):
-#     async def dispatch(self, request: Request, call_next):
-#         if request.method == "POST" and (
-#             "/openai/api/threads" in request.url.path and "runs" in request.url.path):
-            
-#             log.debug(f"request.url.path: {request.url.path}")
+@router.post("/openai/api/threads")
+async def create_thread(request: Request):
+    return await SplitMessagesMiddleware().dispatch(request, request.app.default_dispatcher)
 
-#             response = await call_next(request)
-            
-#             if isinstance(response, StreamingResponse):
-#                 # If it's a streaming response, return a new StreamingResponse
-#                 # that combines the responses
-#                 return StreamingResponse(
-#                     response,
-#                     media_type=response.media_type,
-#                     headers=response.headers,
-#                 )
-#         else:
-#             response = await call_next(request)
-#             return response
 
 app.add_middleware(RAGMiddleware)
 
@@ -312,6 +313,7 @@ app.mount("/openai/api", openai_app)
 app.mount("/images/api/v1", images_app)
 app.mount("/audio/api/v1", audio_app)
 app.mount("/rag/api/v1", rag_app)
+app.include_router(router)
 
 
 @app.get("/api/config")

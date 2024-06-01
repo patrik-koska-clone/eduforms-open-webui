@@ -742,39 +742,36 @@
 
 	const sendPromptOpenAIAssistant = async (assistantId, userPrompt, responseMessageId, _chatId) => {
 		const responseMessage = history.messages[responseMessageId];
-		let threadId = '';
+		let threadId = chat.threadId || ''; // Get the threadId from the chat object
 
 		const docs = messages
 			.filter((message) => message?.files ?? null)
-			.map((message) =>
-				message.files.filter((item) => item.type === 'doc' || item.type === 'collection')
-			)
+			.map((message) => message.files.filter((item) => item.type === 'doc' || item.type === 'collection'))
 			.flat(1);
 
 		console.log(docs);
 
 		scrollToBottom();
 
-		const [initialRes, initialController] = await createOpenAIThread(
-			localStorage.token,
-		);
+		if (!threadId) {
+			// If threadId doesn't exist, create a new thread
+			const [initialRes, initialController] = await createOpenAIThread(localStorage.token);
 
-		if (initialRes && initialRes.ok && initialRes.body) {
+			if (initialRes && initialRes.ok && initialRes.body) {
 			const threadResponse = await initialRes.text();
-
 			const data = JSON.parse(threadResponse);
-
 			threadId = data.id;
+			}
 		}
 
 		if ($chatId == _chatId) {
 			if ($settings.saveChatHistory ?? true) {
-				chat = await updateChatById(localStorage.token, _chatId, {
-					messages: messages,
-					history: history,
-					threadId: threadId
-				});
-				await chats.set(await getChatList(localStorage.token));
+			chat = await updateChatById(localStorage.token, _chatId, {
+				messages: messages,
+				history: history,
+				threadId: threadId // Save the threadId in the chat object
+			});
+			await chats.set(await getChatList(localStorage.token));
 			}
 		}
 
@@ -782,74 +779,76 @@
 
 		scrollToBottom();
 
+		const filteredMessages = [
+			$settings.system
+			? {
+				role: 'system',
+				content: $settings.system
+				}
+			: undefined,
+			...messages.filter((message) => message.role !== 'assistant')
+		].filter((message) => message);
+
+		const messagePayload = {
+			thread_id: threadId, // Include the threadId in the message payload
+			messages: filteredMessages.map((message, idx, arr) => ({
+			role: message.role,
+			...((message.files?.filter((file) => file.type === 'image').length > 0 ?? false) &&
+			message.role === 'user'
+				? {
+					content: [
+					{
+						type: 'text',
+						text:
+						arr.length - 1 !== idx
+							? message.content
+							: message?.raContent ?? message.content
+					},
+					...message.files
+						.filter((file) => file.type === 'image')
+						.map((file) => ({
+						type: 'image_url',
+						image_url: {
+							url: file.url
+						}
+						}))
+					]
+				}
+				: {
+					content:
+					arr.length - 1 !== idx ? message.content : message?.raContent ?? message.content
+				})
+			}))
+		};
+
 		const [messageRes, messageController] = await addMessageToOpenAIThread(
 			localStorage.token,
-			{
-				messages: [
-                $settings.system
-                    ? {
-                            role: 'system',
-                            content: $settings.system
-                      }
-                    : undefined,
-                ...messages    
-            	]
-            .filter((message) => message && message.role !== 'assistant')
-            .map((message, idx, arr) => ({
-                role: message.role,
-                ...((message.files?.filter((file) => file.type === 'image').length > 0 ?? false) &&
-                message.role === 'user'
-                    ? {
-                            content: [
-                                {
-                                    type: 'text',
-                                    text:
-                                        arr.length - 1 !== idx
-                                            ? message.content
-                                            : message?.raContent ?? message.content
-                                },
-                                ...message.files
-                                    .filter((file) => file.type === 'image')
-                                    .map((file) => ({
-                                        type: 'image_url',
-                                        image_url: {
-                                            url: file.url
-                                        }
-                                    }))
-                            ]
-                      }
-                    : {
-                            content:
-                                arr.length - 1 !== idx ? message.content : message?.raContent ?? message.content
-                      })
-            	}))
-			},
+			messagePayload,
 			threadId
-		)
+		);
+
 		if (messageRes && messageRes.ok) {
-    // Message added successfully
-	// Continue with generating the completion
+			// Message added successfully
+			// Continue with generating the completion
 		} else {
 			if (messageRes !== null) {
-				const error = await messageRes.json();
-				console.log(error);
-				if ('detail' in error) {
-					toast.error(error.detail);
-					responseMessage.content = error.detail;
-				} else {
-					if ('message' in error.error) {
-						toast.error(error.error.message);
-						responseMessage.content = error.error.message;
-					} else {
-						toast.error(error.error);
-						responseMessage.content = error.error;
-					}
-				}
+			const error = await messageRes.json();
+			console.log(error);
+			if ('detail' in error) {
+				toast.error(error.detail);
+				responseMessage.content = error.detail;
 			} else {
-				toast.error(
-					$i18n.t(`Uh-oh! There was an issue adding the message to the thread.`)
-				);
-				responseMessage.content = $i18n.t(`Uh-oh! There was an issue adding the message to the thread.`);
+				if ('message' in error.error) {
+				toast.error(error.error.message);
+				responseMessage.content = error.error.message;
+				} else {
+				toast.error(error.error);
+				responseMessage.content = error.error;
+				}
+			}
+			} else {
+			toast.error($i18n.t(`Uh-oh! There was an issue adding the message to the thread.`));
+			responseMessage.content = $i18n.t(`Uh-oh! There was an issue adding the message to the thread.`);
 			}
 
 			responseMessage.error = true;
@@ -859,115 +858,112 @@
 			return; // Exit the function since there was an error
 		}
 
-		
-		
 		const [completionRes, completionController] = await generateOpenAIAssistantCompletion(
 			localStorage.token,
 			{
-				assistant_id: assistantId,
-				stream: true,
-				temperature: $settings?.options?.temperature ?? undefined,
-				top_p: $settings?.options?.top_p ?? undefined,
-				num_ctx: $settings?.options?.num_ctx ?? undefined,
-				frequency_penalty: $settings?.options?.repeat_penalty ?? undefined,
-				max_tokens: $settings?.options?.num_predict ?? undefined,
-				// docs: docs.length > 0 ? docs : undefined,
-				// citations: docs.length > 0
-        	},
+			assistant_id: assistantId,
+			stream: true,
+			temperature: $settings?.options?.temperature ?? undefined,
+			top_p: $settings?.options?.top_p ?? undefined,
+			num_ctx: $settings?.options?.num_ctx ?? undefined,
+			frequency_penalty: $settings?.options?.repeat_penalty ?? undefined,
+			max_tokens: $settings?.options?.num_predict ?? undefined,
+			},
 			threadId
 		);
-		
+
 		if (completionRes && completionRes.ok && completionRes.body) {
 			const textStream = await createOpenAITextStream(completionRes.body, false);
 
 			for await (const update of textStream) {
-				console.log("textStreamUpdate:", update);
-				const { value, done } = update;
-				if (done || stopResponseFlag || _chatId !== $chatId) {
-					responseMessage.done = true;
-					messages = messages;
+			console.log("textStreamUpdate:", update);
+			const { value, done } = update;
+			if (done || stopResponseFlag || _chatId !== $chatId) {
+				responseMessage.done = true;
+				messages = messages;
 
-					if (stopResponseFlag) {
-						completionController.abort('User: Stop Response');
-					}
-
-					break;
+				if (stopResponseFlag) {
+				completionController.abort('User: Stop Response');
 				}
 
-				if (responseMessage.content == '' && value == '\n') {
-					continue;
-				} else {
-					responseMessage.content += value;
-					console.log('Response Content:', responseMessage.content);
-					messages = messages;
-					console.log('Response Messages:', messages);
-				}
-
-				if ($settings.notificationEnabled && !document.hasFocus()) {
-					const notification = new Notification(`OpenAI ${model}`, {
-						body: responseMessage.content,
-						icon: `${WEBUI_BASE_URL}/static/favicon.png`
-					});
-				}
-
-				if ($settings.responseAutoCopy) {
-					copyToClipboard(responseMessage.content);
-				}
-
-				if ($settings.responseAutoPlayback) {
-					await tick();
-					document.getElementById(`speak-button-${responseMessage.id}`)?.click();
-				}
-
-				if (autoScroll) {
-					scrollToBottom();
-				}
+				break;
 			}
-			console.log('Stream processing completed');
+
+			if (responseMessage.content == '' && value == '\n') {
+				continue;
+			} else {
+				responseMessage.content += value;
+				console.log('Response Content:', responseMessage.content);
+				messages = messages;
+				console.log('Response Messages:', messages);
+			}
+
+			if ($settings.notificationEnabled && !document.hasFocus()) {
+				const notification = new Notification(`OpenAI ${model}`, {
+				body: responseMessage.content,
+				icon: `${WEBUI_BASE_URL}/static/favicon.png`
+				});
+			}
+
+			if ($settings.responseAutoCopy) {
+				copyToClipboard(responseMessage.content);
+			}
+
+			if ($settings.responseAutoPlayback) {
+				await tick();
+				document.getElementById(`speak-button-${responseMessage.id}`)?.click();
+			}
+
+			if (autoScroll) {
+				scrollToBottom();
+			}
+			}
 
 			if ($chatId == _chatId) {
-				if ($settings.saveChatHistory ?? true) {
-					chat = await updateChatById(localStorage.token, _chatId, {
-						messages: messages,
-						history: history
-					});
-					await chats.set(await getChatList(localStorage.token));
-				}
+			if ($settings.saveChatHistory ?? true) {
+				chat = await updateChatById(localStorage.token, _chatId, {
+				messages: messages,
+				history: history,
+				threadId: threadId // Save the threadId in the chat object
+				});
+				await chats.set(await getChatList(localStorage.token));
+			}
 			}
 		} else {
 			if (completionRes !== null) {
-				const error = await completionRes.json();
-				console.log(error);
-				if ('detail' in error) {
-					toast.error(error.detail);
-					responseMessage.content = error.detail;
-				} else {
-					if ('message' in error.error) {
-						toast.error(error.error.message);
-						responseMessage.content = error.error.message;
-					} else {
-						toast.error(error.error);
-						responseMessage.content = error.error;
-					}
-				}
+			const error = await completionRes.json();
+			console.log(error);
+			if ('detail' in error) {
+				toast.error(error.detail);
+				responseMessage.content = error.detail;
 			} else {
-				toast.error(
-					$i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
-						provider: model.name ?? model.id
-					})
-				);
-				responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
-					provider: model.name ?? model.id
-				});
+				if ('message' in error.error) {
+				toast.error(error.error.message);
+				responseMessage.content = error.error.message;
+				} else {
+				toast.error(error.error);
+				responseMessage.content = error.error;
+				}
+			}
+			} else {
+			toast.error(
+				$i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+				provider: model.name ?? model.id
+				})
+			);
+			responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+				provider: model.name ?? model.id
+			});
 			}
 
 			responseMessage.error = true;
 			responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
-				provider: model.name ?? model.id
+			provider: model.name ?? model.id
 			});
 			responseMessage.done = true;
 			messages = messages;
 		}
+
 		stopResponseFlag = false;
 		await tick();
 
@@ -978,13 +974,12 @@
 		if (messages.length == 2) {
 			window.history.replaceState(history.state, '', `/c/${_chatId}`);
 
-			//TODO Add Title !!!!
+			// TODO: Add Title
 			// const _title = await generateChatTitle(userPrompt);
 			// await setChatTitle(_chatId, _title);
 			await setChatTitle(_chatId, _chatId);
 		}
 };
-
 
 	const stopResponse = () => {
 		stopResponseFlag = true;
