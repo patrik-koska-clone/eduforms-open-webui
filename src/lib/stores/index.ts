@@ -15,6 +15,7 @@ export const chatId = writable('');
 export const chats = writable([]);
 export const tags = writable([]);
 export const models: Writable<Model[]> = writable([]);
+export const assistants: Writable<Assistant[]> = writable([]);
 
 export const modelfiles = writable([]);
 export const prompts: Writable<Prompt[]> = writable([]);
@@ -40,6 +41,15 @@ export const showSettings = writable(false);
 export const showChangelog = writable(false);
 
 type Model = OpenAIModel | OllamaModel;
+type Assistant = OpenAIAssistant;
+
+type OpenAIAssistant = {
+	id: string;
+	name: string;
+	external: boolean;
+	source?: string;
+};
+
 
 type OpenAIModel = {
 	id: string;

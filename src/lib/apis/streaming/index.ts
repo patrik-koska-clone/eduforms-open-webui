@@ -27,37 +27,41 @@ export async function createOpenAITextStream(
 
 async function* openAIStreamToIterator(
 	reader: ReadableStreamDefaultReader<ParsedEvent>
-): AsyncGenerator<TextStreamUpdate> {
+  ): AsyncGenerator<TextStreamUpdate> {
+	let assistantMessage = '';
+  
 	while (true) {
-		const { value, done } = await reader.read();
-		if (done) {
-			yield { done: true, value: '' };
-			break;
+	  const { value, done } = await reader.read();
+	  if (done) {
+		yield { done: true, value: assistantMessage };
+		break;
+	  }
+	  if (!value) {
+		continue;
+	  }
+	  const data = value.data;
+  
+	  if (data === '[DONE]') {
+		yield { done: true, value: assistantMessage };
+		break;
+	  }
+  
+	  try {
+		const parsedData = JSON.parse(data);
+		console.log(parsedData);
+  
+		if (parsedData.object === 'thread.message' && parsedData.status === 'completed') {
+		  assistantMessage = parsedData.content
+			.map((content) => content.text?.value ?? '')
+			.join('');
+		  yield { done: false, value: assistantMessage };
+		  assistantMessage = '';
 		}
-		if (!value) {
-			continue;
-		}
-		const data = value.data;
-		if (data.startsWith('[DONE]')) {
-			yield { done: true, value: '' };
-			break;
-		}
-
-		try {
-			const parsedData = JSON.parse(data);
-			console.log(parsedData);
-
-			if (parsedData.citations) {
-				yield { done: false, value: '', citations: parsedData.citations };
-				continue;
-			}
-
-			yield { done: false, value: parsedData.choices?.[0]?.delta?.content ?? '' };
-		} catch (e) {
-			console.error('Error extracting delta from SSE event:', e);
-		}
+	  } catch (e) {
+		console.error('Error extracting message from SSE event:', e);
+	  }
 	}
-}
+  }
 
 // streamLargeDeltasAsRandomChunks will chunk large deltas (length > 5) into random sized chunks between 1-3 characters
 // This is to simulate a more fluid streaming, even though some providers may send large chunks of text at once

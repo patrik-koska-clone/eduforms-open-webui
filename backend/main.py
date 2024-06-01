@@ -188,9 +188,95 @@ class RAGMiddleware(BaseHTTPMiddleware):
         async for data in original_generator:
             yield data
 
+class SplitMessagesMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "POST" and (
+            "/openai/api/threads" in request.url.path and "messages" in request.url.path
+        ):
+            log.debug(f"request.url.path: {request.url.path}")
+
+            # Read the original request body
+            body = await request.body()
+            # Decode body to string
+            body_str = body.decode("utf-8")
+            # Parse string to JSON
+            data = json.loads(body_str) if body_str else {}
+
+            if "messages" in data:
+                messages = data.pop("messages", [])
+                responses = []
+                for message in messages:
+                    data["role"] = message["role"]
+                    data["content"] = message["content"]
+                    modified_body_bytes = json.dumps(data).encode("utf-8")
+
+                    # Replace the request body with the modified one
+                    request._body = modified_body_bytes
+
+                    request.headers.__dict__["_list"] = [
+                        (b"content-length", str(len(modified_body_bytes)).encode("utf-8")),
+                        *[
+                            (k, v)
+                            for k, v in request.headers.raw
+                            if k.lower() != b"content-length"
+                        ],
+                    ]
+
+                    response = await call_next(request)
+
+                    responses.append(response)
+
+                # Check if the response is a streaming response
+                if isinstance(responses[-1], StreamingResponse):
+                    # If it's a streaming response, return a new StreamingResponse
+                    # that combines the responses
+                    return StreamingResponse(
+                        self.combine_streaming_responses(responses),
+                        media_type=responses[-1].media_type,
+                        headers=responses[-1].headers,
+                    )
+                else:
+                    # If it's not a streaming response, combine the responses
+                    # into a single JSON response
+                    combined_response = responses[-1]
+                    combined_response.body = b'[' + b','.join(resp.body for resp in responses) + b']'
+                    combined_response.headers["Content-Length"] = str(len(combined_response.body))
+                    return combined_response
+        
+        response = await call_next(request)
+
+        return response
+
+    async def combine_streaming_responses(self, responses):
+        for response in responses:
+            async for chunk in response.body_iterator:
+                yield chunk
+
+
+# class ThreadsMiddleware(BaseHTTPMiddleware):
+#     async def dispatch(self, request: Request, call_next):
+#         if request.method == "POST" and (
+#             "/openai/api/threads" in request.url.path and "runs" in request.url.path):
+            
+#             log.debug(f"request.url.path: {request.url.path}")
+
+#             response = await call_next(request)
+            
+#             if isinstance(response, StreamingResponse):
+#                 # If it's a streaming response, return a new StreamingResponse
+#                 # that combines the responses
+#                 return StreamingResponse(
+#                     response,
+#                     media_type=response.media_type,
+#                     headers=response.headers,
+#                 )
+#         else:
+#             response = await call_next(request)
+#             return response
 
 app.add_middleware(RAGMiddleware)
 
+app.add_middleware(SplitMessagesMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

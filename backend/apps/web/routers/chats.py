@@ -239,11 +239,16 @@ async def get_chat_by_id(id: str, user=Depends(get_current_user)):
 
 @router.post("/{id}", response_model=Optional[ChatResponse])
 async def update_chat_by_id(
-    id: str, form_data: ChatForm, user=Depends(get_current_user)
+    id: str, 
+    form_data: ChatForm, 
+    user=Depends(get_current_user),
+    thread_id: Optional[str] = None, 
 ):
     chat = Chats.get_chat_by_id_and_user_id(id, user.id)
     if chat:
         updated_chat = {**json.loads(chat.chat), **form_data.chat}
+        if thread_id is not None:
+            updated_chat['thread_id'] = thread_id
 
         chat = Chats.update_chat_by_id(id, updated_chat)
         return ChatResponse(**{**chat.model_dump(), "chat": json.loads(chat.chat)})

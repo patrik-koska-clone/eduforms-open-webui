@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import sha256 from 'js-sha256';
 import { getOllamaModels } from '$lib/apis/ollama';
-import { getOpenAIModels } from '$lib/apis/openai';
+import { getOpenAIModels, getOpenAIAssistants } from '$lib/apis/openai';
 import { getLiteLLMModels } from '$lib/apis/litellm';
 
 export const getModels = async (token: string) => {
@@ -24,6 +24,19 @@ export const getModels = async (token: string) => {
 
 	return models;
 };
+
+export const getAssistants = async (token: string) => {
+	let assistants = await Promise.all([
+		await getOpenAIAssistants(token).catch((error) => {
+			console.log(error);
+			return null;
+		})
+	]);
+
+	assistants = assistants.filter((assistants) => assistants).reduce((a, e, i, arr) => a.concat(e), []);
+
+	return assistants;
+}
 
 //////////////////////////
 // Helper functions

@@ -2,7 +2,7 @@
 	import { Collapsible } from 'bits-ui';
 
 	import { setDefaultModels } from '$lib/apis/configs';
-	import { models, showSettings, settings, user } from '$lib/stores';
+	import { assistants, models, showSettings, settings, user } from '$lib/stores';
 	import { onMount, tick, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import Selector from './ModelSelector/Selector.svelte';

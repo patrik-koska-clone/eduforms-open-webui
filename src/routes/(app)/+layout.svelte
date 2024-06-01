@@ -8,6 +8,7 @@
 	import { goto } from '$app/navigation';
 
 	import { getModels as _getModels } from '$lib/utils';
+	import { getAssistants as _getAssistants} from '$lib/utils';
 	import { getOllamaVersion } from '$lib/apis/ollama';
 	import { getModelfiles } from '$lib/apis/modelfiles';
 	import { getPrompts } from '$lib/apis/prompts';
@@ -20,6 +21,7 @@
 		showSettings,
 		settings,
 		models,
+		assistants,
 		modelfiles,
 		prompts,
 		documents,
@@ -49,6 +51,10 @@
 	const getModels = async () => {
 		return _getModels(localStorage.token);
 	};
+
+	const getAssistants = async () => {
+		return _getAssistants(localStorage.token);
+	}
 
 	const setOllamaVersion = async (version: string = '') => {
 		if (version === '') {
@@ -87,7 +93,7 @@
 				// IndexedDB Not Found
 			}
 
-			await models.set(await getModels());
+			await models.set(await getAssistants());
 			await settings.set(JSON.parse(localStorage.getItem('settings') ?? '{}'));
 
 			await modelfiles.set(await getModelfiles(localStorage.token));
@@ -97,7 +103,7 @@
 
 			modelfiles.subscribe(async () => {
 				// should fetch models
-				await models.set(await getModels());
+				await models.set(await getAssistants());
 			});
 
 			document.addEventListener('keydown', function (event) {

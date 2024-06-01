@@ -326,6 +326,7 @@ OLLAMA_BASE_URLS = [url.strip() for url in OLLAMA_BASE_URLS.split(";")]
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "")
+OPENAI_ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID", "")
 
 
 if OPENAI_API_BASE_URL == "":

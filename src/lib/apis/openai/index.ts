@@ -170,6 +170,42 @@ export const getOpenAIModels = async (token: string = '') => {
 		: models;
 };
 
+export const getOpenAIAssistants = async (token: string = '') => {
+	let error = null;
+
+	const res = await fetch(`${OPENAI_API_BASE_URL}/assistants`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = `OpenAI: ${err?.error?.message ?? 'Network Problem'}`;
+			return [];
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	const assistants = Array.isArray(res) ? res : res?.data ?? null;
+
+	return assistants
+		? assistants
+				.map((assistant) => ({ id: assistant.id, name: assistant.name ?? assistant.id, external: true }))
+				.sort((a, b) => {
+					return a.name.localeCompare(b.name);
+				})
+		: assistants;
+};
+
+
 export const getOpenAIModelsDirect = async (
 	base_url: string = 'https://api.openai.com/v1',
 	api_key: string = ''
@@ -223,6 +259,95 @@ export const generateOpenAIChatCompletion = async (
 			'Content-Type': 'application/json'
 		},
 		body: JSON.stringify(body)
+	}).catch((err) => {
+		console.log(err);
+		error = err;
+		return null;
+	});
+
+	if (error) {
+		throw error;
+	}
+
+	return [res, controller];
+};
+
+export const addMessageToOpenAIThread = async(
+	token: string = '',
+	body: object,
+	thread_id: string = '',
+	url: string = OPENAI_API_BASE_URL,
+): Promise<[Response | null, AbortController]> => {
+	const controller = new AbortController();
+	let error = null;
+
+	const res = await fetch(`${url}/threads/${thread_id}/messages`, {
+		signal: controller.signal,
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json',
+			'OpenAI-Beta': 'assistants=v2',
+		},
+		body: JSON.stringify(body)
+	}).catch((err) => {
+		console.log(err);
+		error = err;
+		return null;
+	});
+
+	if (error) {
+		throw error;
+	}
+
+	return [res, controller];
+};
+
+export const generateOpenAIAssistantCompletion = async (
+	token: string = '',
+	body: object,
+	thread_id: string = '',
+	url: string = OPENAI_API_BASE_URL,
+): Promise<[Response | null, AbortController]> => {
+	const controller = new AbortController();
+	let error = null;
+
+	const res = await fetch(`${url}/threads/${thread_id}/runs`, {
+		signal: controller.signal,
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json',
+			'OpenAI-Beta': 'assistants=v2',
+		},
+		body: JSON.stringify(body)
+	}).catch((err) => {
+		console.log(err);
+		error = err;
+		return null;
+	});
+
+	if (error) {
+		throw error;
+	}
+
+	return [res, controller];
+}
+
+export const createOpenAIThread = async(
+	token: string = '',
+	url: string = OPENAI_API_BASE_URL
+): Promise<[Response | null, AbortController]> => {
+	const controller = new AbortController();
+	let error = null;
+
+	const res = await fetch(`${url}/threads`, {
+		signal: controller.signal,
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json'
+		}
 	}).catch((err) => {
 		console.log(err);
 		error = err;

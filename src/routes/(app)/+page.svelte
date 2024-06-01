@@ -8,6 +8,7 @@
 
 	import {
 		models,
+		assistants,
 		modelfiles,
 		user,
 		settings,
@@ -31,7 +32,10 @@
 		updateChatById
 	} from '$lib/apis/chats';
 	import { queryCollection, queryDoc } from '$lib/apis/rag';
-	import { generateOpenAIChatCompletion, generateTitle } from '$lib/apis/openai';
+	import { addMessageToOpenAIThread, createOpenAIThread, 
+		generateOpenAIAssistantCompletion, 
+		generateOpenAIChatCompletion,  
+		generateTitle } from '$lib/apis/openai';
 
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
 	import Messages from '$lib/components/chat/Messages.svelte';
@@ -41,6 +45,7 @@
 	import { LITELLM_API_BASE_URL, OLLAMA_API_BASE_URL, OPENAI_API_BASE_URL } from '$lib/constants';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import { createOpenAITextStream } from '$lib/apis/streaming';
+	import About from '$lib/components/chat/Settings/About.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -252,23 +257,25 @@
 
 	const sendPrompt = async (prompt, parentId) => {
 		const _chatId = JSON.parse(JSON.stringify($chatId));
-
+		
 		await Promise.all(
-			(atSelectedModel !== '' ? [atSelectedModel.id] : selectedModels).map(async (modelId) => {
+			(atSelectedModel !== '' ? [atSelectedModel.id] : selectedModels)
+				.map(async (modelId) => {
 				console.log('modelId', modelId);
 				const model = $models.filter((m) => m.id === modelId).at(0);
+				const assistant = $assistants.filter((a) => a.id === modelId).at(0);
 
-				if (model) {
+				if (model || assistant) {
 					// Create response message
 					let responseMessageId = uuidv4();
 					let responseMessage = {
-						parentId: parentId,
-						id: responseMessageId,
-						childrenIds: [],
-						role: 'assistant',
-						content: '',
-						model: model.id,
-						timestamp: Math.floor(Date.now() / 1000) // Unix epoch
+					parentId: parentId,
+					id: responseMessageId,
+					childrenIds: [],
+					role: 'assistant',
+					content: '',
+					model: modelId,
+					timestamp: Math.floor(Date.now() / 1000) // Unix epoch
 					};
 
 					// Add message to history and Set currentId to messageId
@@ -277,22 +284,22 @@
 
 					// Append messageId to childrenIds of parent message
 					if (parentId !== null) {
-						history.messages[parentId].childrenIds = [
-							...history.messages[parentId].childrenIds,
-							responseMessageId
-						];
+					history.messages[parentId].childrenIds = [
+						...history.messages[parentId].childrenIds,
+						responseMessageId
+					];
 					}
 
 					if (model?.external) {
-						await sendPromptOpenAI(model, prompt, responseMessageId, _chatId);
+					await sendPromptOpenAIAssistant(model.id, prompt, responseMessageId, _chatId);
 					} else if (model) {
-						await sendPromptOllama(model, prompt, responseMessageId, _chatId);
+					await sendPromptOllama(model, prompt, responseMessageId, _chatId);
 					}
 				} else {
-					toast.error($i18n.t(`Model {{modelId}} not found`, { modelId }));
+					toast.error($i18n.t(`Model or Assistant {{modelId}} not found`, { modelId }));
 				}
-			})
-		);
+				})
+);
 
 		await chats.set(await getChatList(localStorage.token));
 	};
@@ -732,6 +739,252 @@
 			await setChatTitle(_chatId, _title);
 		}
 	};
+
+	const sendPromptOpenAIAssistant = async (assistantId, userPrompt, responseMessageId, _chatId) => {
+		const responseMessage = history.messages[responseMessageId];
+		let threadId = '';
+
+		const docs = messages
+			.filter((message) => message?.files ?? null)
+			.map((message) =>
+				message.files.filter((item) => item.type === 'doc' || item.type === 'collection')
+			)
+			.flat(1);
+
+		console.log(docs);
+
+		scrollToBottom();
+
+		const [initialRes, initialController] = await createOpenAIThread(
+			localStorage.token,
+		);
+
+		if (initialRes && initialRes.ok && initialRes.body) {
+			const threadResponse = await initialRes.text();
+
+			const data = JSON.parse(threadResponse);
+
+			threadId = data.id;
+		}
+
+		if ($chatId == _chatId) {
+			if ($settings.saveChatHistory ?? true) {
+				chat = await updateChatById(localStorage.token, _chatId, {
+					messages: messages,
+					history: history,
+					threadId: threadId
+				});
+				await chats.set(await getChatList(localStorage.token));
+			}
+		}
+
+		await tick();
+
+		scrollToBottom();
+
+		const [messageRes, messageController] = await addMessageToOpenAIThread(
+			localStorage.token,
+			{
+				messages: [
+                $settings.system
+                    ? {
+                            role: 'system',
+                            content: $settings.system
+                      }
+                    : undefined,
+                ...messages    
+            	]
+            .filter((message) => message && message.role !== 'assistant')
+            .map((message, idx, arr) => ({
+                role: message.role,
+                ...((message.files?.filter((file) => file.type === 'image').length > 0 ?? false) &&
+                message.role === 'user'
+                    ? {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text:
+                                        arr.length - 1 !== idx
+                                            ? message.content
+                                            : message?.raContent ?? message.content
+                                },
+                                ...message.files
+                                    .filter((file) => file.type === 'image')
+                                    .map((file) => ({
+                                        type: 'image_url',
+                                        image_url: {
+                                            url: file.url
+                                        }
+                                    }))
+                            ]
+                      }
+                    : {
+                            content:
+                                arr.length - 1 !== idx ? message.content : message?.raContent ?? message.content
+                      })
+            	}))
+			},
+			threadId
+		)
+		if (messageRes && messageRes.ok) {
+    // Message added successfully
+	// Continue with generating the completion
+		} else {
+			if (messageRes !== null) {
+				const error = await messageRes.json();
+				console.log(error);
+				if ('detail' in error) {
+					toast.error(error.detail);
+					responseMessage.content = error.detail;
+				} else {
+					if ('message' in error.error) {
+						toast.error(error.error.message);
+						responseMessage.content = error.error.message;
+					} else {
+						toast.error(error.error);
+						responseMessage.content = error.error;
+					}
+				}
+			} else {
+				toast.error(
+					$i18n.t(`Uh-oh! There was an issue adding the message to the thread.`)
+				);
+				responseMessage.content = $i18n.t(`Uh-oh! There was an issue adding the message to the thread.`);
+			}
+
+			responseMessage.error = true;
+			responseMessage.done = true;
+			messages = messages;
+			
+			return; // Exit the function since there was an error
+		}
+
+		
+		
+		const [completionRes, completionController] = await generateOpenAIAssistantCompletion(
+			localStorage.token,
+			{
+				assistant_id: assistantId,
+				stream: true,
+				temperature: $settings?.options?.temperature ?? undefined,
+				top_p: $settings?.options?.top_p ?? undefined,
+				num_ctx: $settings?.options?.num_ctx ?? undefined,
+				frequency_penalty: $settings?.options?.repeat_penalty ?? undefined,
+				max_tokens: $settings?.options?.num_predict ?? undefined,
+				// docs: docs.length > 0 ? docs : undefined,
+				// citations: docs.length > 0
+        	},
+			threadId
+		);
+		
+		if (completionRes && completionRes.ok && completionRes.body) {
+			const textStream = await createOpenAITextStream(completionRes.body, false);
+
+			for await (const update of textStream) {
+				console.log("textStreamUpdate:", update);
+				const { value, done } = update;
+				if (done || stopResponseFlag || _chatId !== $chatId) {
+					responseMessage.done = true;
+					messages = messages;
+
+					if (stopResponseFlag) {
+						completionController.abort('User: Stop Response');
+					}
+
+					break;
+				}
+
+				if (responseMessage.content == '' && value == '\n') {
+					continue;
+				} else {
+					responseMessage.content += value;
+					console.log('Response Content:', responseMessage.content);
+					messages = messages;
+					console.log('Response Messages:', messages);
+				}
+
+				if ($settings.notificationEnabled && !document.hasFocus()) {
+					const notification = new Notification(`OpenAI ${model}`, {
+						body: responseMessage.content,
+						icon: `${WEBUI_BASE_URL}/static/favicon.png`
+					});
+				}
+
+				if ($settings.responseAutoCopy) {
+					copyToClipboard(responseMessage.content);
+				}
+
+				if ($settings.responseAutoPlayback) {
+					await tick();
+					document.getElementById(`speak-button-${responseMessage.id}`)?.click();
+				}
+
+				if (autoScroll) {
+					scrollToBottom();
+				}
+			}
+			console.log('Stream processing completed');
+
+			if ($chatId == _chatId) {
+				if ($settings.saveChatHistory ?? true) {
+					chat = await updateChatById(localStorage.token, _chatId, {
+						messages: messages,
+						history: history
+					});
+					await chats.set(await getChatList(localStorage.token));
+				}
+			}
+		} else {
+			if (completionRes !== null) {
+				const error = await completionRes.json();
+				console.log(error);
+				if ('detail' in error) {
+					toast.error(error.detail);
+					responseMessage.content = error.detail;
+				} else {
+					if ('message' in error.error) {
+						toast.error(error.error.message);
+						responseMessage.content = error.error.message;
+					} else {
+						toast.error(error.error);
+						responseMessage.content = error.error;
+					}
+				}
+			} else {
+				toast.error(
+					$i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+						provider: model.name ?? model.id
+					})
+				);
+				responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+					provider: model.name ?? model.id
+				});
+			}
+
+			responseMessage.error = true;
+			responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+				provider: model.name ?? model.id
+			});
+			responseMessage.done = true;
+			messages = messages;
+		}
+		stopResponseFlag = false;
+		await tick();
+
+		if (autoScroll) {
+			scrollToBottom();
+		}
+
+		if (messages.length == 2) {
+			window.history.replaceState(history.state, '', `/c/${_chatId}`);
+
+			//TODO Add Title !!!!
+			// const _title = await generateChatTitle(userPrompt);
+			// await setChatTitle(_chatId, _title);
+			await setChatTitle(_chatId, _chatId);
+		}
+};
+
 
 	const stopResponse = () => {
 		stopResponseFlag = true;
